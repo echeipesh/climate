@@ -1,5 +1,8 @@
 package climate
 
+import climate.json._
+import spray.json._
+
 import geotrellis._
 import geotrellis.gdal._
 import geotrellis.raster.TileLayout
@@ -34,8 +37,8 @@ class IngestRasterBuilder(re: RasterExtent, tileCols: Int, tileRows: Int) {
 
   def addRaster(time: TimeId, raster: Raster): Unit = {
     timeIds += time
-    for(col <- 0 until tileCols) {
-      for(row <- 0 until tileRows) {
+    for(row <- 0 until tileRows) {
+      for(col <- 0 until tileCols) {
         rasterSeqs(row*tileCols + col) += 
           TimeSeriesRaster(time, CroppedRaster(raster, resolutionLayout.getExtent(col, row)))
       }
@@ -65,6 +68,15 @@ class Ingester(val paths: Seq[String], tileCols: Int, tileRows: Int) {
   def apply(outputDir: Path, config: Configuration): Unit = {
     val fs = outputDir.getFileSystem(config)
     val blockSize = fs.getDefaultBlockSize()
+
+    def writeToPath(path: Path)(f: PrintWriter => Unit): Unit = {
+      val fdos = fs.create(path)
+      val out = new PrintWriter(fdos)
+      f(out)
+      out.close()
+      fdos.close()
+    }
+
 
     println(s"Deleting and creating output path: $outputDir")
     fs.delete(outputDir, true)
@@ -110,17 +122,14 @@ class Ingester(val paths: Seq[String], tileCols: Int, tileRows: Int) {
         blockSize
       )
 
-    // Write splits
     val splits = partitioner.splits
-    val splitFile = new Path(outputDir, "splits")
-    println("writing splits to " + splitFile)
-    val fdos = fs.create(splitFile)
-    val out = new PrintWriter(fdos)
-    splits.foreach {
-      split => out.println(new String(Base64.encodeBase64(ByteBuffer.allocate(4).putInt(split).array())))
+
+    val metadata = 
+      TimeSeriesMetadata(builder.timeIds.size, splits, rasterExtent, builder.tileLayout, rasterType)
+
+    writeToPath(new Path(outputDir, "metadata")) { out =>
+      out.println(metadata.toJson.compactPrint)
     }
-    out.close()
-    fdos.close()
 
     println(s"Splits: ${splits.toSeq}")
     println(s"NUM PARTITIONS: ${partitioner.numPartitions}")
@@ -138,6 +147,9 @@ class Ingester(val paths: Seq[String], tileCols: Int, tileRows: Int) {
       writers
     }
 
+    val set = scala.collection.mutable.Set[Long]()
+    val set2 = scala.collection.mutable.Set[(Int,Int)]()
+
     for(tileId <- 0 until builder.rasterSeqs.length) {
       val rasterPath = new Path(outputDir, f"tile-${tileId}%05d")
       fs.mkdirs(rasterPath)
@@ -152,6 +164,8 @@ class Ingester(val paths: Seq[String], tileCols: Int, tileRows: Int) {
         timeSeriesRasters.foreach {
           case TimeSeriesRaster(timeId, raster) => {
             key.set(timeId.timeId)
+            set += raster.data.lengthLong
+            set2 += ((raster.cols, raster.rows))
             writers(partitioner.getPartition(timeId.timeId)).append(key, ArgWritable.fromRasterData(raster.data))
             println(s"Saved tileId=${timeId},partition=${partitioner.getPartition(timeId.timeId)}")
           }
@@ -162,9 +176,28 @@ class Ingester(val paths: Seq[String], tileCols: Int, tileRows: Int) {
       }
       println(s"Done saving ${timeSeriesRasters.length} tiles")
     }
+
+    println(s"Result: ${set.toSeq}")
+    println(s"Result: ${set2.toSeq}")
   }
 }
 
+import java.lang.System.currentTimeMillis
+
+object Benchmark {
+  def apply(times:Int)(body: => Unit):Long = {
+    var i = 0
+    var totalDuration = 0L
+    while(i < times) {
+      val start = currentTimeMillis()
+      body
+      totalDuration += currentTimeMillis() - start
+      i += 1
+    }
+
+    totalDuration / (i+1)
+  }
+}
 
 object Main {
   def main(args: Array[String]): Unit = {
@@ -174,7 +207,7 @@ object Main {
     val pathHistorical = "/media/storage/monthly/tas/access1-0/historical/BCSD_0.5deg_tas_Amon_access1-0_historical_r1i1p1_195001-200512.nc"
     val pathFuture = "/media/storage/monthly/tas/access1-0/rcp45/BCSD_0.5deg_tas_Amon_access1-0_rcp45_r1i1p1_200601-210012.nc"
 
-    val ingest = true
+    val ingest = false
 
     // Hadoop config
     val config = {
@@ -194,23 +227,42 @@ object Main {
       fs.mkdirs(outputDir)
 
       val ingest = new Ingester(Seq(pathHistorical, pathFuture), 4, 2)
+//      val ingest = new Ingester(Seq(pathHistorical, pathFuture), 1, 1)
 
       ingest(outputDir, config)
 
     } else {
       val sparkConf =
         new SparkConf()
-          .setMaster("local[6]")
+          .setMaster("local[14]")
           .setAppName("Climate")
           .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
           .set("spark.kryo.registrator", "geotrellis.spark.KryoRegistrator")
 
       val sparkContext = new SparkContext(sparkConf)
 
-      val splitFile = new Path(outputDir, "splits")
+      // val rdd = TSRasterRDD(outputDir, sparkContext)
 
-//      val rdd = TSRasterRDD(
-//      val rd: RasterData = rdd.sum
+      // val sum: Raster = rdd.sum
+      // val count = rdd.count
+      // val mean = sum.mapDouble { d => d / count }
+      //(-25.969268798828125,31.58228302001953)
+
+      val start = TimeId(new org.joda.time.DateTime(2000,1,1,12,0,org.joda.time.DateTimeZone.UTC)).toInt
+      val end = TimeId(new org.joda.time.DateTime(2050,1,1,12,0,org.joda.time.DateTimeZone.UTC)).toInt
+
+      val tsr = TSRaster(outputDir, sparkContext).filter { tsr => 
+        val i = tsr.timeId.toInt
+        i >= start && i <= end
+      }
+      val duration = 
+        Benchmark(10) {
+          val sum = tsr.sum
+          val count = tsr.timeCount
+          val mean = sum.mapDouble(_/count)
+          println(s"(Min,Max) = ${mean.findMinMaxDouble}, count = $count")
+        }
+      println(s"Took $duration milliseconds.")
     }
     println("Done.")
   }

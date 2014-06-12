@@ -41,14 +41,13 @@ object ClimateBuild extends Build {
         "org.joda" % "joda-convert" % "1.6",
         "com.typesafe" % "config" % "1.0.2",
         "org.spire-math" %% "spire" % "0.7.4",
+        "io.spray" %% "spray-json" % "1.2.6",
         "org.scalatest" %% "scalatest" % "2.1.5" % "test",
         "com.google.guava" % "guava" % "14.0.1",
         "org.apache.spark" %% "spark-core" % "0.9.0-incubating" excludeAll (
           ExclusionRule(organization = "org.apache.hadoop")),
         "org.apache.hadoop" % "hadoop-client" % "1.2.1" excludeAll (
 	  ExclusionRule(organization = "hsqldb"))
-//        "com.fasterxml.jackson.module" %% "jackson-module-scala" % "2.3.0",
-//        "com.quantifind" %% "sumac" % "0.2.3"
       ),
 
       resolvers ++= Seq(

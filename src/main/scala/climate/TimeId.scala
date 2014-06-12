@@ -13,6 +13,12 @@ object TimeId {
   val startDate = new DateTime(1950,1,1,12,0,DateTimeZone.UTC)
 
   val EMPTY = TimeId(0)
+
+  def apply(dateTime: DateTime): TimeId =
+    TimeId(Days.daysBetween(dateTime, startDate).getDays)
+
+  implicit def timeIdToInt(id: TimeId): Int = id.toInt
+  implicit def intToTimeId(i: Int): TimeId = TimeId(i)
 }
 
 case class TimeRange(startTime: TimeId, endTime: TimeId) { 

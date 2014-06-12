@@ -1,9 +1,13 @@
 package climate
 
+import climate.json._
+import spray.json._
+
 import geotrellis._
 import geotrellis.raster.TileLayout
 import geotrellis.spark._
 import geotrellis.spark.formats._
+import geotrellis.spark.utils.HdfsUtils
 
 import org.apache.spark.Partition
 import org.apache.spark.SparkContext
@@ -21,11 +25,11 @@ case class TSRasterRDD(val prev: RDD[TimeSeriesRaster])
   extends RDD[TimeSeriesRaster](prev) {
 
   def sum: Raster = {
-    reduce { (tsr1, tsr2) => 
-      val rd = tsr1.raster.combineDouble(tsr2.raster) {
+    foldLeft(Raster.empty( { (tsr1, tsr2) =>
+      val r = tsr1.raster.combineDouble(tsr2.raster) {
         (z1, z2) => z1 + z2 
       }
-      TimeSeriesRaster(TimeId.EMPTY, rd)
+      TimeSeriesRaster(TimeId.EMPTY, r)
     }
     .raster
   }
@@ -51,30 +55,57 @@ case class TSRasterRDD(val prev: RDD[TimeSeriesRaster])
 object TSRasterRDD {
   implicit def fromRdd(rdd:RDD[TimeSeriesRaster]): TSRasterRDD = 
     TSRasterRDD(rdd)
-
-  def apply(raster: String, sc: SparkContext): TSRasterRDD =
-    apply(new Path(raster), sc)
-
-  def apply(raster: Path, sc: SparkContext): TSRasterRDD =
-    TSRasterHadoopRDD(raster, sc).toTSRasterRDD
 }
 
-class TSRaster(rasterExtent: RasterExtent, tileLayout: TileLayout, rdds: Seq[TSRasterRDD]) {
-  def mean: Raster = ???
+class TSRaster(metadata: TimeSeriesMetadata, rdds: Seq[TSRasterRDD]) {
+  def sum: Raster =
+    TileRaster(
+      rdds.par.map(_.sum).toList,
+//      rdds.map(_.sum),
+      metadata.rasterExtent,
+      metadata.tileLayout
+    ).toArrayRaster
 
-  def toWritable(tr: Tile): WritableTile =
-    (TileIdWritable(tr.id), ArgWritable.fromRasterData(tr.raster.data))
+  def timeCount: Int = metadata.timeCount
+
+  def filter(f: TimeSeriesRaster => Boolean): TSRaster =
+    new TSRaster(metadata, rdds.map(rdd => TSRasterRDD.fromRdd(rdd.filter(f))))
 }
 
 object TSRaster {
-  def apply(path: String, sc: SparkContext): TSRaster = {
-    val meta: (RasterExtent, TileLayout) = ??? // read metadata from path
-    val (re, tileLayout) = meta
-    val rdds =
-      (0 until tileLayout.tileCols * tileLayout.tileRows).map { tileId =>
-        TSRasterHadoopRDD(s"$path/$tileId", sc).toTSRasterRDD
+  def apply(path: String, sc: SparkContext): TSRaster =
+    apply(new Path(path), sc)
+
+  def apply(path: Path, sc: SparkContext): TSRaster = {
+    val metaPath = new Path(path, "metadata")
+
+    val metadata: TimeSeriesMetadata =
+      HdfsUtils.getLineScanner(metaPath, sc.hadoopConfiguration) match {
+        case Some(in) =>
+          try {
+            in.mkString.parseJson.convertTo[TimeSeriesMetadata]
+          }
+          finally {
+            in.close
+          }
+        case None =>
+          sys.error(s"oops - couldn't find metadata here - ${metaPath.toUri.toString}")
       }
 
-    new TSRaster(re, tileLayout, rdds)
+
+    val tileLayout = metadata.tileLayout
+    val rdds =
+      for(row <- 0 until tileLayout.tileRows;
+          col <- 0 until tileLayout.tileCols) yield {
+        val tileId = (row * tileLayout.tileCols) + col
+        TSRasterHadoopRDD(
+          new Path(path, f"tile-${tileId}%05d"),
+          sc,
+          metadata.partitioner,
+          metadata.resolutionLayout.getRasterExtent(col, row),
+          metadata.rasterType).toTSRasterRDD
+      }
+
+    new TSRaster(metadata, rdds)
   }
 }
