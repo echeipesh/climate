@@ -1,16 +1,16 @@
 package climate
 
-import geotrellis._
-import geotrellis.raster.TileLayout
+import geotrellis.raster._
+import geotrellis.feature.Extent
 
 case class TimeSeriesMetadata(
   timeCount: Int,
   splits: Array[Int], 
-  rasterExtent: RasterExtent, 
+  extent: Extent,
   tileLayout: TileLayout, 
-  rasterType: RasterType
+  cellType: CellType
 ) {
-  lazy val resolutionLayout = tileLayout.getResolutionLayout(rasterExtent)
+  lazy val resolutionLayout = TileExtents(extent, tileLayout)
   def partitioner = new TimeSeriesPartitioner(splits)
 
   override def equals(o: Any): Boolean =
@@ -25,8 +25,8 @@ case class TimeSeriesMetadata(
   private lazy val toHashable = (
     timeCount,
     java.util.Arrays.hashCode(splits.map(_.hashCode)),
-    rasterExtent, 
+    extent,
     tileLayout, 
-    rasterType
+    cellType
   )
 }

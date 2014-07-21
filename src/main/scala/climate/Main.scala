@@ -3,14 +3,8 @@ package climate
 import climate.json._
 import spray.json._
 
-import geotrellis._
-import geotrellis.gdal._
-import geotrellis.raster.TileLayout
-import geotrellis.raster.RasterData
-import geotrellis.spark.formats.ArgWritable
-import geotrellis.spark.utils.HdfsUtils
-
 import org.apache.spark.SparkConf
+import org.apache.spark.TaskContext
 import org.apache.spark.SparkContext
 
 import org.apache.hadoop.fs.FileSystem
@@ -26,176 +20,32 @@ import java.nio.ByteBuffer
 
 import scala.collection.mutable
 
-import scala.collection.mutable
-
-class IngestRasterBuilder(re: RasterExtent, tileCols: Int, tileRows: Int) {
-  val tileLayout = TileLayout(re, tileCols, tileRows)
-  val resolutionLayout = tileLayout.getResolutionLayout(re)
-
-  val timeIds = mutable.ListBuffer[TimeId]()
-  val rasterSeqs = Array.fill(tileCols * tileRows)(mutable.ListBuffer[TimeSeriesRaster]())
-
-  def addRaster(time: TimeId, raster: Raster): Unit = {
-    timeIds += time
-    for(row <- 0 until tileRows) {
-      for(col <- 0 until tileCols) {
-        rasterSeqs(row*tileCols + col) += 
-          TimeSeriesRaster(time, CroppedRaster(raster, resolutionLayout.getExtent(col, row)))
-      }
-    }
-  }
-}
-
-class Ingester(val paths: Seq[String], tileCols: Int, tileRows: Int) {
-  // Gather metadata
-  val (rasterExtent, rasterType) = {
-    val rasterDataSet = Gdal.open(paths(0))
-    try {
-      (rasterDataSet.rasterExtent, rasterDataSet.band(1).toRasterData.getType)
-    } finally {
-      rasterDataSet.close
-    }
-  }
-
-  if((rasterExtent.cols / tileCols).toDouble != (rasterExtent.cols / tileCols.toDouble)) {
-    sys.error(s"Tile columns ($tileCols) does not evenly divide raster extent $rasterExtent")
-  }
-
-  if((rasterExtent.rows / tileRows).toDouble != (rasterExtent.rows / tileRows.toDouble)) {
-    sys.error(s"Tile rows ($tileRows) does not evenly divide raster extent $rasterExtent")
-  }
-
-  def apply(outputDir: Path, config: Configuration): Unit = {
-    val fs = outputDir.getFileSystem(config)
-    val blockSize = fs.getDefaultBlockSize()
-
-    def writeToPath(path: Path)(f: PrintWriter => Unit): Unit = {
-      val fdos = fs.create(path)
-      val out = new PrintWriter(fdos)
-      f(out)
-      out.close()
-      fdos.close()
-    }
-
-
-    println(s"Deleting and creating output path: $outputDir")
-    fs.delete(outputDir, true)
-    fs.mkdirs(outputDir)
-
-    var maxTime = Int.MinValue
-    var minTime = Int.MaxValue
-
-    val builder = new IngestRasterBuilder(rasterExtent, tileCols, tileRows)
-
-    for(path <- paths) {
-      val rasterDataSet = Gdal.open(path)
-      val bandCount = rasterDataSet.bandCount
-
-      if(rasterExtent != rasterDataSet.rasterExtent) {
-        sys.error(s"Raster Extents don't match: $rasterExtent and ${rasterDataSet.rasterExtent}")
-      }
-
-      for(i <- 1 to bandCount) {
-        val band = rasterDataSet.band(i)
-        val meta =
-          band
-            .metadata
-            .map(_.split("="))
-            .map(l => { (l(0), l(1)) })
-            .toMap
-
-        val timeInt = meta("NETCDF_DIM_Time").toDouble.toInt
-        maxTime = math.max(maxTime, timeInt)
-        minTime = math.min(minTime, timeInt)
-        val time = TimeId(timeInt)
-        val raster = Raster(band.toRasterData, rasterExtent)
-        println(s"Adding ${time.date}")
-        builder.addRaster(time, raster)
-      }
-    }
-
-    val partitioner =
-      TimeSeriesPartitioner(
-        builder.timeIds,
-        rasterExtent,
-        rasterType,
-        blockSize
-      )
-
-    val splits = partitioner.splits
-
-    val metadata = 
-      TimeSeriesMetadata(builder.timeIds.size, splits, rasterExtent, builder.tileLayout, rasterType)
-
-    writeToPath(new Path(outputDir, "metadata")) { out =>
-      out.println(metadata.toJson.compactPrint)
-    }
-
-    println(s"Splits: ${splits.toSeq}")
-    println(s"NUM PARTITIONS: ${partitioner.numPartitions}")
-
-    // open as many writers as number of partitions
-    def openWriters(rasterPath: Path, num: Int) = {
-      val writers = new Array[MapFile.Writer](num)
-      for (i <- 0 until num) {
-        val mapFilePath = new Path(rasterPath, f"part-${i}%05d")
-
-        writers(i) = new MapFile.Writer(config, fs, mapFilePath.toUri.toString,
-          classOf[TimeIdWritable], classOf[ArgWritable], SequenceFile.CompressionType.RECORD)
-
-      }
-      writers
-    }
-
-    val set = scala.collection.mutable.Set[Long]()
-    val set2 = scala.collection.mutable.Set[(Int,Int)]()
-
-    for(tileId <- 0 until builder.rasterSeqs.length) {
-      val rasterPath = new Path(outputDir, f"tile-${tileId}%05d")
-      fs.mkdirs(rasterPath)
-
-      val timeSeriesRasters = builder.rasterSeqs(tileId)
-
-      val key = new TimeIdWritable()
-
-      val writers = openWriters(rasterPath, partitioner.numPartitions)
-
-      try {
-        timeSeriesRasters.foreach {
-          case TimeSeriesRaster(timeId, raster) => {
-            key.set(timeId.timeId)
-            set += raster.data.lengthLong
-            set2 += ((raster.cols, raster.rows))
-            writers(partitioner.getPartition(timeId.timeId)).append(key, ArgWritable.fromRasterData(raster.data))
-            println(s"Saved tileId=${timeId},partition=${partitioner.getPartition(timeId.timeId)}")
-          }
-        }
-      }
-      finally {
-        writers.foreach(_.close)
-      }
-      println(s"Done saving ${timeSeriesRasters.length} tiles")
-    }
-
-    println(s"Result: ${set.toSeq}")
-    println(s"Result: ${set2.toSeq}")
-  }
-}
-
 import java.lang.System.currentTimeMillis
 
 object Benchmark {
-  def apply(times:Int)(body: => Unit):Long = {
+  def apply[T](msg: String)(body: => T): T = {
+    println(s"[BENCH] $msg - START ${currentTimeMillis -  1405716575000L - 185000L}")
+    val start = currentTimeMillis
+    val r = body
+    val duration = currentTimeMillis - start
+    println(s"[BENCH] $msg - END  ${currentTimeMillis - 1405716575000L - 185000L} - Took $duration ms")
+    r
+  }
+
+  def apply(body: => Unit): Long = {
+    val start = currentTimeMillis()
+    body
+    currentTimeMillis() - start
+  }
+
+  def apply(times:Int)(body: => Unit): Long = {
     var i = 0
     var totalDuration = 0L
     while(i < times) {
-      val start = currentTimeMillis()
-      body
-      totalDuration += currentTimeMillis() - start
+      totalDuration += apply(body)
       i += 1
     }
-
-    totalDuration / (i+1)
+    totalDuration / i
   }
 }
 
@@ -248,21 +98,62 @@ object Main {
       // val mean = sum.mapDouble { d => d / count }
       //(-25.969268798828125,31.58228302001953)
 
-      val start = TimeId(new org.joda.time.DateTime(2000,1,1,12,0,org.joda.time.DateTimeZone.UTC)).toInt
+      val start = TimeId(new org.joda.time.DateTime(2049,1,1,12,0,org.joda.time.DateTimeZone.UTC)).toInt
       val end = TimeId(new org.joda.time.DateTime(2050,1,1,12,0,org.joda.time.DateTimeZone.UTC)).toInt
 
-      val tsr = TSRaster(outputDir, sparkContext).filter { tsr => 
-        val i = tsr.timeId.toInt
-        i >= start && i <= end
-      }
-      val duration = 
-        Benchmark(10) {
-          val sum = tsr.sum
-          val count = tsr.timeCount
-          val mean = sum.mapDouble(_/count)
-          println(s"(Min,Max) = ${mean.findMinMaxDouble}, count = $count")
+
+      val tsr = TSRaster(outputDir, sparkContext)
+// .filter { tsr => 
+//         val i = tsr.timeId.toInt
+//         i >= start && i <= end
+//       }
+
+
+      import geotrellis.raster._
+      import geotrellis.raster.op.local._
+      val s = (1 to 12).map { i => ArrayTile.empty(TypeDouble,180,180) }
+      val d2 = 
+        Benchmark {
+          s.toSeq.localAdd
+          ()
         }
-      println(s"Took $duration milliseconds.")
+
+
+
+      val duration = 
+        Benchmark("TOTAL") {
+          println("Start.")
+
+          val start = currentTimeMillis()
+
+          val rdd = tsr.rdds.head
+          println("HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH")
+          val results = new Array[Array[TimeSeriesRaster]](rdd.partitions.size)
+          val func = (iter: Iterator[TimeSeriesRaster]) => Benchmark("ITERATOR") { iter.toArray }
+          sparkContext.runJob(
+            rdd, 
+            (context: TaskContext, iter: Iterator[TimeSeriesRaster]) => { Benchmark("Do Func") { func(iter) } },
+            0 until rdd.partitions.size, 
+            false,
+            (index: Int, res: Array[TimeSeriesRaster]) => { Benchmark("Set Result") { results(index) = res } }
+          )
+//          val sum = tsr.sum
+//          println(s"(Min,Max) = ${sum.findMinMaxDouble}")//, count = $count")
+
+//          val count = tsr.timeCount
+//          val mean = sum.mapDouble(_/count)
+
+
+          val duration = currentTimeMillis() - start
+
+
+//          println(s"(Min,Max) = ${mean.findMinMaxDouble}, count = $count  ($duration ms)")
+
+
+          println("End.")
+        }
+//      println(s"Took $duration milliseconds.")
+      println(s"Isolated example: $d2 ms")
     }
     println("Done.")
   }

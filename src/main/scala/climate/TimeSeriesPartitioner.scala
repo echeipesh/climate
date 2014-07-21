@@ -1,6 +1,6 @@
 package climate
 
-import geotrellis._
+import geotrellis.raster._
 
 import scala.collection.mutable
 
@@ -19,6 +19,13 @@ class TimeSeriesPartitioner(val splits: Array[Int])  extends org.apache.spark.Pa
     case _ => sys.error(s"Invalid key: ${key.getClass.getName}")
   }
 
+  // get min,max timeId in a given partition
+  def range(partition: Int): (Int, Int) = {
+    val min = if (partition == 0) Int.MinValue else splits(partition - 1) + 1
+    val max = if (partition == splits.length) Int.MaxValue else splits(partition)
+    (min, max)
+  }
+
   override def numPartitions = splits.length + 1
 
   override def toString = "TimeSeriesPartitioner split points: " + {
@@ -29,15 +36,16 @@ class TimeSeriesPartitioner(val splits: Array[Int])  extends org.apache.spark.Pa
 object TimeSeriesPartitioner {
   def apply(
     timeIds: Traversable[TimeId],
-    rasterExtent: RasterExtent,
-    rasterType: RasterType,
+    cols: Int,
+    rows: Int,
+    cellType: CellType,
     blockSize: Long
   ): TimeSeriesPartitioner = {
-    val rastersPerBlock = (blockSize / (rasterExtent.cols * rasterExtent.rows * rasterType.bytes)).toInt
+    val tilesPerBlock = (blockSize / (cols * rows * cellType.bytes)).toInt
     val splits = mutable.ListBuffer[Int]()
     var count = 1
     for(time <- timeIds) {
-      if(count == rastersPerBlock) {
+      if(count == tilesPerBlock) {
         splits += time.timeId
         count = 1
       } else {

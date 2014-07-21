@@ -43,6 +43,7 @@ object ClimateBuild extends Build {
         "org.spire-math" %% "spire" % "0.7.4",
         "io.spray" %% "spray-json" % "1.2.6",
         "org.scalatest" %% "scalatest" % "2.1.5" % "test",
+        "com.quantifind" %% "sumac" % "0.2.3",
         "com.google.guava" % "guava" % "14.0.1",
         "org.apache.spark" %% "spark-core" % "0.9.0-incubating" excludeAll (
           ExclusionRule(organization = "org.apache.hadoop")),

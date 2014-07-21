@@ -15,7 +15,7 @@ object TimeId {
   val EMPTY = TimeId(0)
 
   def apply(dateTime: DateTime): TimeId =
-    TimeId(Days.daysBetween(dateTime, startDate).getDays)
+    TimeId(Days.daysBetween(startDate, dateTime).getDays)
 
   implicit def timeIdToInt(id: TimeId): Int = id.toInt
   implicit def intToTimeId(i: Int): TimeId = TimeId(i)

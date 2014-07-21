@@ -1,7 +1,7 @@
 package climate
 
-import geotrellis._
-import geotrellis.raster.TileLayout
+import geotrellis.raster._
+import geotrellis.feature.Extent
 
 import spray.json._
 
@@ -24,25 +24,6 @@ package object json {
       }
   }
 
-  implicit object RasterExtentFormat extends RootJsonFormat[RasterExtent] {
-    def write(rasterExtent: RasterExtent) = 
-      JsObject(
-        "extent" -> rasterExtent.extent.toJson,
-        "cols" -> JsNumber(rasterExtent.cols),
-        "rows" -> JsNumber(rasterExtent.rows),
-        "cellwidth" -> JsNumber(rasterExtent.cellwidth),
-        "cellheight" -> JsNumber(rasterExtent.cellheight)
-      )
-
-    def read(value: JsValue): RasterExtent =
-      value.asJsObject.getFields("extent", "cols", "rows", "cellwidth", "cellheight") match {
-        case Seq(extent, JsNumber(cols), JsNumber(rows), JsNumber(cellwidth), JsNumber(cellheight)) =>
-          val ext = extent.convertTo[Extent]
-          RasterExtent(ext, cellwidth.toDouble, cellheight.toDouble, cols.toInt, rows.toInt)
-        case _ =>
-          throw new DeserializationException("RasterExtent expected.")
-      }
-  }
 
   implicit object TileLayoutFormat extends RootJsonFormat[TileLayout] {
     def write(tileLayout: TileLayout) =
@@ -67,14 +48,14 @@ package object json {
       JsObject(
         "timeCount" -> JsNumber(metadata.timeCount),
         "splits" -> JsArray(metadata.splits.map(JsNumber(_)).toList),
-        "rasterExtent" -> metadata.rasterExtent.toJson,
+        "extent" -> metadata.extent.toJson,
         "tileLayout" -> metadata.tileLayout.toJson,
-        "rasterType" -> JsNumber(RasterType.toAwtType(metadata.rasterType))
+        "cellType" -> JsNumber(CellType.toAwtType(metadata.cellType))
       )
 
     def read(value: JsValue): TimeSeriesMetadata = 
-      value.asJsObject.getFields("timeCount", "splits", "rasterExtent", "tileLayout", "rasterType") match {
-        case Seq(JsNumber(timeCount), splits: JsArray, rasterExtent, tileLayout, JsNumber(rasterType)) =>
+      value.asJsObject.getFields("timeCount", "splits", "extent", "tileLayout", "cellType") match {
+        case Seq(JsNumber(timeCount), splits: JsArray, extent, tileLayout, JsNumber(cellType)) =>
           val spl = 
             splits.elements.map { s =>
               s match {
@@ -82,10 +63,10 @@ package object json {
                 case _ => throw new DeserializationException("Splits must be numbers.")
               }
             }
-          val re = rasterExtent.convertTo[RasterExtent]
+          val e = extent.convertTo[Extent]
           val tl = tileLayout.convertTo[TileLayout]
-          val rt = RasterType.fromAwtType(rasterType.toInt)
-          TimeSeriesMetadata(timeCount.toInt, spl.toArray, re, tl, rt)
+          val ct = CellType.fromAwtType(cellType.toInt)
+          TimeSeriesMetadata(timeCount.toInt, spl.toArray, e, tl, ct)
         case _ => throw new DeserializationException("TimeSeriesMetadata expected.")
       }
   }
